@@ -1,0 +1,16 @@
+.vscode/
+VCU/Backup/
+VCU/backup2/
+
+build/
+Debug/
+Release/
+
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.tmp
+*.bak
