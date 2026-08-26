@@ -118,7 +118,7 @@
  * El umbral se fija inicialmente al 50% del fondo de escala y deberá
  * validarse mediante ensayos con la señal analógica real. */
 
-#define BRAKE_ACTIVE_THRESHOLD_ADC        2048U                                                                            // Brake activation threshold, initially 50% of full scale
+#define BRAKE_ACTIVE_THRESHOLD_ADC        2048U                                                                           // Brake activation threshold, initially 50% of full scale
 
 
 /* ARRANQUE está configurado como entrada digital en PC6.
