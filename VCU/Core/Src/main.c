@@ -11,7 +11,7 @@
  * @brief          : Implements Relative Current Control (0-100%)
  * @brief          : Sets Safety Limits: Max AC = 15A, Max Brake = 0A
  * @brief          : Implements Plausibility Check between APPS1 and APPS2
- * @brief          : Uses a single brake input for the R2D activation condition
+ * @brief          : Uses a single 4-20 mA brake input for the R2D activation condition
  * @brief          : Implements Drive Enable/Disable via Button Press
  * @brief          : FIXED: Node ID reverted to 0x1B
  ******************************************************************************
@@ -113,19 +113,38 @@
 #define MAIN_LOOP_PERIOD_MS              10U                                                                              // Main control-loop period used for APPS supervision
 #define CAN_TX_TIMEOUT_MS                100U                                                                             // Maximum time allowed while waiting for space in the CAN Tx FIFO
 
-/* Ajustar tras calibrar la señal analógica real del freno.
+/** --- Brake 4-20 mA input --------------------------------------------------
  * Se emplea un único canal de freno en PB2 / ADC2_IN12.
- * El umbral se fija inicialmente al 50% del fondo de escala y deberá
- * validarse mediante ensayos con la señal analógica real. */
+ *
+ * Hipótesis de hardware empleada en estos valores:
+ *   - Resistencia shunt: 165 ohm
+ *   - Referencia ADC (VDDA): 3.3 V
+ *   - ADC: 12 bits (0-4095)
+ *
+ * 4 mA  -> 0.66 V -> ADC ~= 819
+ * 20 mA -> 3.30 V -> ADC = 4095
+ *
+ * AVISO: con 165 ohm, 20 mA producen idealmente 3.30 V, exactamente el fondo
+ * de escala del ADC. Por tanto, no existe margen superior para detectar sobrecorriente
+ * pero en teoría los bucles 4-20 no deben sobre pasar los 20 mA pq están preparados para ello
+ *  y tolerancias del sensor, shunt o VDDA pueden provocar saturación.
+ * El diagnóstico de fallo inferior sí puede mantenerse y deberá calibrarse en placa. */
 
-#define BRAKE_ACTIVE_THRESHOLD_ADC        2048U                                                                           // Brake activation threshold, initially 50% of full scale
+#define BRAKE_SHUNT_RESISTOR_OHM          165.0f                                                                           // Shunt resistor used to convert the 4-20 mA signal into voltage
+#define BRAKE_ADC_REFERENCE_V             3.3f                                                                             // ADC analogue reference voltage
+#define BRAKE_ADC_FULL_SCALE              4095.0f                                                                          // 12-bit ADC full-scale value
+#define BRAKE_ADC_MIN                     819U                                                                             // Expected ADC value at 4 mA
+#define BRAKE_ADC_MAX                     4095U                                                                            // Expected ADC value at 20 mA
+#define BRAKE_ADC_FAULT_LOW               700U                                                                             // Values below this threshold are considered an invalid 4-20 mA signal
+#define BRAKE_ADC_FAULT_HIGH              4095U                                                                            // Values above this threshold are considered an invalid 4-20 mA signal
+#define BRAKE_ACTIVE_THRESHOLD_ADC        2457U                                                                            // Approx. 12 mA / 50% of the 4-20 mA measurement span
 
 
 /* ARRANQUE está configurado como entrada digital en PC6.
- * Cambiar a GPIO_PIN_SET si el pulsador es activo a 
- * nivel alto si cambiamos la config del pin. */
+ * Cambiar a GPIO_PIN_RESET si el pulsador es activo a 
+ * nivel bajo si cambiamos la config del pin. */
 
-#define ARRANQUE_ACTIVE_STATE       GPIO_PIN_RESET                                                                        // Active state of the ARRANQUE button (GPIO_PIN_SET for active high, GPIO_PIN_RESET for active low)
+#define ARRANQUE_ACTIVE_STATE       GPIO_PIN_SET                                                                          // Active state of the ARRANQUE button (GPIO_PIN_SET for active high, GPIO_PIN_RESET for active low)
 
 /* USER CODE END PM */
 
@@ -167,7 +186,10 @@ volatile uint32_t     AMS_last_measurement_tick = 0U;                           
 volatile uint32_t     brake_lights_last_tick = 0U;                                                                        // Tick of the last correctly decoded brake lights message
 
 uint16_t              adc_value = 0;                                                                                      // Variable to store raw ADC value (0-4095)
-uint16_t              brake_adc_value = 0;                                                                                // Raw brake value from PB2 / ADC2_IN12
+uint16_t              brake_adc_value = 0;                                                                                // Raw brake ADC value from PB2 / ADC2_IN12
+uint16_t              BRAKE = 0;                                                                                          // Brake signal scaled from the valid 4-20 mA range to 0-1000
+float                 brake_current_mA = 0.0f;                                                                            // Brake-loop current reconstructed from the ADC measurement
+bool                  brake_signal_valid = false;                                                                         // Indicates whether the measured current is inside the valid 4-20 mA diagnostic window
 uint16_t              APPS1 = 0;                                                                                          // Variable to store mapped APPS1 value (0-1000, representing 0-100.0% Relative Current)
 uint16_t              APPS2 = 0;                                                                                          // Variable to store mapped APPS2 value (0-1000, representing 0-100.0% Relative Current)
 float                 differential = 0.0f;                                                                                // Variable to store the difference between APPS1 and APPS2 for plausibility check
@@ -192,7 +214,7 @@ void Error_Handler(void);                                                       
 void Send_CAN_Message(uint32_t id, uint8_t *data, uint32_t len);                                                          // Function to send a CAN message with specified ID, data, and length
 void Wait_And_Send_R2D_Activation(void);                                                                                  // Waits for the ARRANQUE button to be held for R2D_HOLD_TIME_MS and sends the R2D activation message
 void Send_R2D_Activation(void);                                                                                           // Sends the R2D activation message over CAN
-bool R2D_Inputs_Are_Active(uint16_t brake_adc);                                                                           // Checks ARRANQUE and the single brake channel
+bool R2D_Inputs_Are_Active(uint16_t brake_adc);                                                                           // Checks ARRANQUE and the valid single 4-20 mA brake channel
 static bool Read_Brake_Channel(void);                                                                                     // Reads the brake signal from ADC2
 void Sound_R2D_Buzzer(void);                                                                                              // Activates the R2D buzzer for the configured time
 static uint16_t Read_BE_U16(const uint8_t *data);                                                                         // Reads an unsigned 16-bit Motorola/Big-Endian value
@@ -305,7 +327,7 @@ int main(void)                                                                  
 
   #pragma region R2D Activation
 
-  Wait_And_Send_R2D_Activation();                                                                                         // Wait for ARRANQUE and the brake pedal to be held for 2 seconds and send the R2D activation message
+  Wait_And_Send_R2D_Activation();                                                                                         // Wait for ARRANQUE and a valid 4-20 mA brake signal to be held for 2 seconds and send the R2D activation message
 
   #pragma endregion
 
@@ -656,9 +678,9 @@ void Send_R2D_Activation(void)                                                  
 
 #pragma endregion
 
-#pragma region Check R2D 
+#pragma region Check R2D condition
 
-static bool Read_Brake_Channel(void)                                                                                      // Reads the single brake sensor using ADC2
+static bool Read_Brake_Channel(void)                                                                                      // Reads and validates the single 4-20 mA brake sensor using ADC2
 {
   bool brake_read_ok = true;
 
@@ -671,29 +693,56 @@ static bool Read_Brake_Channel(void)                                            
       (HAL_ADC_PollForConversion(&hadc2, 20U) == HAL_OK))                                                                 // Waits for the brake conversion
   {
     brake_adc_value = (uint16_t)HAL_ADC_GetValue(&hadc2);                                                                 // Reads the brake input from PB2 / ADC2_IN12
+
+    brake_current_mA =
+        (((float)brake_adc_value * BRAKE_ADC_REFERENCE_V) / BRAKE_ADC_FULL_SCALE) /
+        BRAKE_SHUNT_RESISTOR_OHM * 1000.0f;                                                                               // Converts ADC counts -> voltage -> loop current in mA
+
+    brake_signal_valid =
+        (brake_adc_value >= BRAKE_ADC_FAULT_LOW) &&
+        (brake_adc_value <= BRAKE_ADC_FAULT_HIGH);                                                                         // Validates that the signal remains inside the expected 4-20 mA diagnostic window
+
+    if (brake_adc_value <= BRAKE_ADC_MIN)
+    {
+      BRAKE = 0U;                                                                                                         // 4 mA or less corresponds to the minimum valid brake command
+    }
+    else if (brake_adc_value >= BRAKE_ADC_MAX)
+    {
+      BRAKE = REL_CURRENT_MAX;                                                                                            // 20 mA or more corresponds to the maximum brake command
+    }
+    else
+    {
+      BRAKE = (uint16_t)map(brake_adc_value,
+                            BRAKE_ADC_MIN,
+                            BRAKE_ADC_MAX,
+                            0L,
+                            REL_CURRENT_MAX);                                                                              // Maps the nominal 4-20 mA span to 0-1000
+    }
   }
   else
   {
     brake_read_ok = false;
+    brake_signal_valid = false;                                                                                           // An ADC acquisition failure invalidates the brake signal
   }
 
   if (HAL_ADC_Stop(&hadc2) != HAL_OK)                                                                                     // Stops ADC2 after the conversion
   {
     brake_read_ok = false;
+    brake_signal_valid = false;
   }
 
-  return brake_read_ok;
+  return brake_read_ok && brake_signal_valid;                                                                             // Only a correctly acquired and electrically valid signal is accepted
 }
 
-bool R2D_Inputs_Are_Active(uint16_t brake_adc)                                                                            // Checks ARRANQUE and the single brake channel
+bool R2D_Inputs_Are_Active(uint16_t brake_adc)                                                                            // Checks ARRANQUE and the single valid 4-20 mA brake channel
 {
   const bool start_button_pressed =
       (HAL_GPIO_ReadPin(ARRANQUE_GPIO_Port, ARRANQUE_Pin) == ARRANQUE_ACTIVE_STATE);
 
   const bool brake_pressed =
-      (brake_adc >= BRAKE_ACTIVE_THRESHOLD_ADC);                                                                          // Brake signal must exceed the calibrated activation threshold
+      (brake_adc >= BRAKE_ACTIVE_THRESHOLD_ADC);                                                                          // Approx. 12 mA (50% of the 4-20 mA measurement span)
 
-  return start_button_pressed && brake_pressed;                                                                           // R2D is valid when ARRANQUE and the brake are simultaneously active
+  return start_button_pressed && brake_pressed && brake_signal_valid;                                                      // R2D is valid only with ARRANQUE pressed and a valid brake signal above threshold
 }
 
 #pragma endregion
@@ -707,7 +756,7 @@ void Wait_And_Send_R2D_Activation(void)                                         
 
   while (1)
   {
-    const bool brake_read_ok = Read_Brake_Channel();                                                                      // Reads the single brake input from PB2 / ADC2_IN12
+    const bool brake_read_ok = Read_Brake_Channel();                                                                      // Reads, converts and validates the single 4-20 mA brake input from PB2 / ADC2_IN12
 
     if (brake_read_ok && R2D_Inputs_Are_Active(brake_adc_value))                                                          // Starts the R2D validation when ARRANQUE and brake are active
     {
