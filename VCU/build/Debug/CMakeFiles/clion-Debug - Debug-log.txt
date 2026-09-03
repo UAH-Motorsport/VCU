@@ -1,5 +1,14 @@
 "C:\Program Files\JetBrains\CLion 2025.3.2\bin\cmake\win\x64\bin\cmake.exe" -DCMAKE_BUILD_TYPE=Debug --preset Debug -S C:\VCU\VCU -B C:\VCU\VCU\build\Debug
 Build type: Debug
--- Configuring done (0.1s)
--- Generating done (0.1s)
--- Build files have been written to: C:/VCU/VCU/build/Debug
+CMake Error at CMakeLists.txt:58 (target_link_libraries):
+  The keyword signature for target_link_libraries has already been used with
+  the target "VCU".  All uses of target_link_libraries with a target must be
+  either all-keyword or all-plain.
+
+  The uses of the keyword signature are here:
+
+   * cmake/stm32cubemx/CMakeLists.txt:94 (target_link_libraries)
+
+
+
+-- Configuring incomplete, errors occurred!
