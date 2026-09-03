@@ -1,3 +1,9 @@
 {
-    "cmake.sourceDirectory": "C:/VCU/VCU/cmake/stm32cubemx"
+    "cmake.sourceDirectory": "C:/VCU/VCU",
+    "files.associations": {
+        "*.bak": "plaintext"
+    },
+    "files.exclude": {
+        "**/*.bak": true
+    }
 }

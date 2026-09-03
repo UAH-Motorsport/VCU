@@ -66,6 +66,8 @@ void Error_Handler(void);
 #define APPS_1_GPIO_Port GPIOA
 #define APPS_2_Pin GPIO_PIN_1
 #define APPS_2_GPIO_Port GPIOA
+#define FRENO_2_Pin GPIO_PIN_1
+#define FRENO_2_GPIO_Port GPIOB
 #define FRENO_Pin GPIO_PIN_2
 #define FRENO_GPIO_Port GPIOB
 #define ARRANQUE_Pin GPIO_PIN_6

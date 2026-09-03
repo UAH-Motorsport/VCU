@@ -44,6 +44,7 @@
 #include <string.h>                                                                                                       // For memset
 #include <stdbool.h>                                                                                                      // For boolean data type
 #include <math.h>                                                                                                         // For mathematical functions like abs()
+#include <stdio.h>                                                                                                        // Debug logs through SWV/ITM
 
 /* USER CODE END Includes */
 
@@ -113,6 +114,17 @@
 #define MAIN_LOOP_PERIOD_MS              10U                                                                              // Main control-loop period used for APPS supervision
 #define CAN_TX_TIMEOUT_MS                100U                                                                             // Maximum time allowed while waiting for space in the CAN Tx FIFO
 
+// --- R2D startup debug -------------------------------------------------------
+#define R2D_DEBUG_LOGS                   1U                                                                                // Set to 0 to disable R2D startup logs
+#define R2D_LOG_PERIOD_MS                250U                                                                              // Periodic input-status log while waiting for ARRANQUE + brake
+#define R2D_PDU_LOG_PERIOD_MS            250U                                                                              // Periodic PDU-status log while waiting for R2D ACTIVE
+
+#if R2D_DEBUG_LOGS
+#define R2D_LOG(...)                     printf(__VA_ARGS__)
+#else
+#define R2D_LOG(...)                     ((void)0)
+#endif
+
 /** --- Brake 4-20 mA input --------------------------------------------------
  * Se emplea un único canal de freno en PB2 / ADC2_IN12.
  *
@@ -141,10 +153,10 @@
 
 
 /* ARRANQUE está configurado como entrada digital en PC6.
- * Cambiar a GPIO_PIN_RESET si el pulsador es activo a 
- * nivel bajo si cambiamos la config del pin. */
+ * Cambiar a GPIO_PIN_SET si el pulsador es activo a 
+ * nivel alto si cambiamos la config del pin. */
 
-#define ARRANQUE_ACTIVE_STATE       GPIO_PIN_SET                                                                          // Active state of the ARRANQUE button (GPIO_PIN_SET for active high, GPIO_PIN_RESET for active low)
+#define ARRANQUE_ACTIVE_STATE       GPIO_PIN_RESET                                                                        // Active state of the ARRANQUE button (GPIO_PIN_SET for active high, GPIO_PIN_RESET for active low)
 
 /* USER CODE END PM */
 
@@ -155,6 +167,9 @@
 #pragma region private variables
 
 /* hadc1, hadc2 and hfdcan1 are already declared in adc.h and fdcan.h. */
+
+/* COM1 is the NUCLEO Virtual COM Port routed through the ST-LINK USB interface. */
+COM_InitTypeDef BspCOMInit;
 
 /* USER CODE BEGIN PV */
 FDCAN_TxHeaderTypeDef TxHeader;                                                                                           // CAN Tx header (same for all messages, only ID and data change)
@@ -244,6 +259,31 @@ long map(long x, long in_min, long in_max, long out_min, long out_max)          
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;                                                // Perform the mapping calculation and return the mapped value
 }
 
+#if R2D_DEBUG_LOGS
+/* Retarget printf() to COM1 (Virtual COM Port of the NUCLEO through ST-LINK).
+ * COM1 must be enabled in the .ioc and initialized before the first log.
+ * Serial settings: 115200 baud, 8 data bits, no parity, 1 stop bit. */
+int _write(int file, char *ptr, int len)
+{
+  (void)file;
+
+  if ((ptr == NULL) || (len <= 0))
+  {
+    return 0;
+  }
+
+  if (HAL_UART_Transmit(&hcom_uart[COM1],
+                        (uint8_t *)ptr,
+                        (uint16_t)len,
+                        HAL_MAX_DELAY) != HAL_OK)
+  {
+    return -1;
+  }
+
+  return len;
+}
+#endif
+
 /* USER CODE END 0 */
 
 #pragma endregion
@@ -275,6 +315,24 @@ int main(void)                                                                  
   MX_ADC1_Init();                                                                                                         // Initialize ADC1 peripheral
   MX_ADC2_Init();                                                                                                         // Initialize ADC2 peripheral
   /* USER CODE BEGIN 2 */
+
+  /* Initialize COM1 / Virtual COM Port before any diagnostic log is printed.
+   * CubeMX board configuration must have VCP enabled (PA2=LPUART1_TX, PA3=LPUART1_RX). */
+  BspCOMInit.BaudRate   = 115200;
+  BspCOMInit.WordLength = COM_WORDLENGTH_8B;
+  BspCOMInit.StopBits   = COM_STOPBITS_1;
+  BspCOMInit.Parity     = COM_PARITY_NONE;
+  BspCOMInit.HwFlowCtl  = COM_HWCONTROL_NONE;
+
+  if (BSP_COM_Init(COM1, &BspCOMInit) != BSP_ERROR_NONE)
+  {
+    Error_Handler();
+  }
+
+  /* Disable stdout buffering so every R2D_LOG() is sent immediately. */
+  setvbuf(stdout, NULL, _IONBF, 0);
+
+  R2D_LOG("\r\n[SERIAL] COM1 ready: 115200 baud, 8N1\r\n");
 
   // Start FDCAN
   if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)                                                                                // If starting FDCAN fails, call the error handler
@@ -669,11 +727,16 @@ void Send_R2D_Activation(void)                                                  
 {
   memset(TxData, 0, sizeof(TxData));                                                                                      // Clear the TxData buffer to ensure no residual data is sent
 
-  /* R2D_Active_Sequence_VCU: start bit 36, longitud 1 bit. */
-  TxData[R2D_ACTIVATION_BYTE] |= R2D_ACTIVATION_MASK;                                                                     // Set the activation bit in the appropriate byte of the CAN message to indicate drive enable
+  /* R2D_Active_Sequence_VCU: start bit 36, length 1 bit. */
+  TxData[R2D_ACTIVATION_BYTE] |= R2D_ACTIVATION_MASK;                                                                     // Set byte 4, bit 4
 
-  /* Se envían 8 bytes porque la señal se encuentra en el byte 4. */
-  Send_CAN_Message(CAN_ID_R2D, TxData, 8U);                                                                               // Send the R2D activation message with the specified CAN ID and 8 bytes of data
+  R2D_LOG("[CAN TX] R2D activation request\r\n");
+  R2D_LOG("[CAN TX] ID   = 0x%08lX\r\n", (unsigned long)CAN_ID_R2D);
+  R2D_LOG("[CAN TX] DATA = %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+          TxData[0], TxData[1], TxData[2], TxData[3],
+          TxData[4], TxData[5], TxData[6], TxData[7]);
+
+  Send_CAN_Message(CAN_ID_R2D, TxData, 8U);                                                                               // Send the R2D activation request
 }
 
 #pragma endregion
@@ -693,7 +756,7 @@ static bool Read_Brake_Channel(void)                                            
       (HAL_ADC_PollForConversion(&hadc2, 20U) == HAL_OK))                                                                 // Waits for the brake conversion
   {
     brake_adc_value = (uint16_t)HAL_ADC_GetValue(&hadc2);                                                                 // Reads the brake input from PB2 / ADC2_IN12
-
+    map(brake_adc_value, BRAKE_ADC_MIN, BRAKE_ADC_MAX, 0L, REL_CURRENT_MAX);
     brake_current_mA =
         (((float)brake_adc_value * BRAKE_ADC_REFERENCE_V) / BRAKE_ADC_FULL_SCALE) /
         BRAKE_SHUNT_RESISTOR_OHM * 1000.0f;                                                                               // Converts ADC counts -> voltage -> loop current in mA
@@ -751,55 +814,160 @@ bool R2D_Inputs_Are_Active(uint16_t brake_adc)                                  
 
 void Wait_And_Send_R2D_Activation(void)                                                                                   // Blocks startup until ARRANQUE and the brake input are valid for two seconds
 {
-  uint32_t hold_start_tick = 0U;                                                                                          // Tick at which the brake input and ARRANQUE first become simultaneously active
+  uint32_t hold_start_tick = 0U;                                                                                          // Tick at which brake and ARRANQUE first become simultaneously active
   bool hold_timer_started = false;                                                                                        // Indicates whether the two-second validation timer is running
+  uint32_t last_input_log_tick = 0U;
+  uint32_t last_pdu_log_tick = 0U;
+  bool previous_button_pressed = false;
+  bool previous_brake_pressed = false;
+  bool previous_brake_valid = false;
+  bool first_input_sample = true;
+
+  R2D_LOG("\r\n==================================================\r\n");
+  R2D_LOG("       VCU - R2D STARTUP DIAGNOSTIC\r\n");
+  R2D_LOG("==================================================\r\n");
+  R2D_LOG("[R2D] Waiting for valid brake + ARRANQUE button\r\n");
+  R2D_LOG("[R2D] Brake threshold ADC = %u\r\n", BRAKE_ACTIVE_THRESHOLD_ADC);
+  R2D_LOG("[R2D] Required hold time  = %lu ms\r\n", (unsigned long)R2D_HOLD_TIME_MS);
 
   while (1)
   {
-    const bool brake_read_ok = Read_Brake_Channel();                                                                      // Reads, converts and validates the single 4-20 mA brake input from PB2 / ADC2_IN12
+    const bool brake_read_ok = Read_Brake_Channel();
+    const bool button_pressed =
+        (HAL_GPIO_ReadPin(ARRANQUE_GPIO_Port, ARRANQUE_Pin) == ARRANQUE_ACTIVE_STATE);
+    const bool brake_pressed = (brake_adc_value >= BRAKE_ACTIVE_THRESHOLD_ADC);
+    const uint32_t now = HAL_GetTick();
 
-    if (brake_read_ok && R2D_Inputs_Are_Active(brake_adc_value))                                                          // Starts the R2D validation when ARRANQUE and brake are active
+    if (first_input_sample ||
+        (button_pressed != previous_button_pressed) ||
+        (brake_pressed != previous_brake_pressed) ||
+        (brake_signal_valid != previous_brake_valid) ||
+        ((uint32_t)(now - last_input_log_tick) >= R2D_LOG_PERIOD_MS))
+    {
+      const uint32_t brake_current_centi_mA =
+          (brake_current_mA > 0.0f) ? (uint32_t)(brake_current_mA * 100.0f + 0.5f) : 0U;
+
+      R2D_LOG("[INPUT] Button=%u | Brake=%u | Valid=%u | ReadOK=%u | ADC=%u | I=%lu.%02lu mA | BRAKE=%u/1000\r\n",
+              button_pressed ? 1U : 0U,
+              brake_pressed ? 1U : 0U,
+              brake_signal_valid ? 1U : 0U,
+              brake_read_ok ? 1U : 0U,
+              brake_adc_value,
+              (unsigned long)(brake_current_centi_mA / 100U),
+              (unsigned long)(brake_current_centi_mA % 100U),
+              BRAKE);
+
+      previous_button_pressed = button_pressed;
+      previous_brake_pressed = brake_pressed;
+      previous_brake_valid = brake_signal_valid;
+      last_input_log_tick = now;
+      first_input_sample = false;
+    }
+
+    if (brake_read_ok && R2D_Inputs_Are_Active(brake_adc_value))
     {
       if (!hold_timer_started)
       {
-        hold_start_tick = HAL_GetTick();                                                                                  // Starts timing when ARRANQUE and the brake input are simultaneously valid
+        hold_start_tick = now;
         hold_timer_started = true;
+        R2D_LOG("[R2D] Conditions valid -> starting 2 s hold timer\r\n");
       }
-      else if ((uint32_t)(HAL_GetTick() - hold_start_tick) >= R2D_HOLD_TIME_MS)
+      else if ((uint32_t)(now - hold_start_tick) >= R2D_HOLD_TIME_MS)
       {
         uint32_t r2d_wait_start_tick;
+        uint16_t previous_r2d_status = 0xFFFFU;
+        uint16_t previous_r2d_internal_status = 0xFFFFU;
+        uint16_t previous_r2d_errors = 0xFFFFU;
 
-        R2D_status = 0U;                                                                                                  // Clears any R2D state retained from a previous request
+        R2D_LOG("[R2D] Hold completed successfully (%lu ms)\r\n",
+                (unsigned long)(now - hold_start_tick));
+
+        R2D_status = 0U;
+        R2D_internal_status = 0U;
         R2D_error_flags = 0U;
         CAN_reception_error = false;
-        PDU_last_R2D_tick = 0U;                                                                                           // Requires a fresh PDU response after sending the activation request
+        PDU_last_R2D_tick = 0U;
 
-        Send_R2D_Activation();                                                                                            // Requests execution of the R2D sequence in the PDU
+        R2D_LOG("[R2D] Sending activation request to PDU...\r\n");
+        Send_R2D_Activation();
         r2d_wait_start_tick = HAL_GetTick();
+        last_pdu_log_tick = r2d_wait_start_tick;
+
+        R2D_LOG("[R2D] Waiting for fresh PDU status = 0x%04X (ACTIVE)\r\n", R2D_STATUS_ACTIVE);
 
         while ((R2D_status != R2D_STATUS_ACTIVE) ||
-               (PDU_last_R2D_tick == 0U))                                                                                 // Waits until the PDU reports the active R2D state
+               (PDU_last_R2D_tick == 0U))
         {
-          if ((R2D_error_flags != 0U) || CAN_reception_error)
+          const uint32_t pdu_now = HAL_GetTick();
+
+          if ((R2D_status != previous_r2d_status) ||
+              (R2D_internal_status != previous_r2d_internal_status) ||
+              (R2D_error_flags != previous_r2d_errors) ||
+              ((uint32_t)(pdu_now - last_pdu_log_tick) >= R2D_PDU_LOG_PERIOD_MS))
           {
-            Error_Handler();                                                                                              // Stops startup after a PDU or CAN reception fault
+            R2D_LOG("[PDU] Status=0x%04X | Internal=0x%04X | AIR+=%u | AIR-=%u | PRE=%u | DIS=%u | VCUbit=%u | Errors=0x%04X | Fresh=%u\r\n",
+                    R2D_status,
+                    R2D_internal_status,
+                    R2D_air_positive_active ? 1U : 0U,
+                    R2D_air_negative_active ? 1U : 0U,
+                    R2D_precharge_active ? 1U : 0U,
+                    R2D_discharge_active ? 1U : 0U,
+                    R2D_activation_sequence_vcu ? 1U : 0U,
+                    R2D_error_flags,
+                    (PDU_last_R2D_tick != 0U) ? 1U : 0U);
+
+            previous_r2d_status = R2D_status;
+            previous_r2d_internal_status = R2D_internal_status;
+            previous_r2d_errors = R2D_error_flags;
+            last_pdu_log_tick = pdu_now;
           }
 
-          if ((uint32_t)(HAL_GetTick() - r2d_wait_start_tick) >= R2D_ACTIVE_TIMEOUT_MS)
+          if (R2D_error_flags != 0U)
           {
-            Error_Handler();                                                                                              // Prevents an unlimited wait if the PDU cannot complete the sequence
+            R2D_LOG("[ERROR] PDU R2D error flags = 0x%04X\r\n", R2D_error_flags);
+            Error_Handler();
           }
 
-          HAL_Delay(R2D_STATUS_CHECK_PERIOD_MS);                                                                          // FDCAN interrupts remain enabled while waiting for the new PDU status
+          if (CAN_reception_error)
+          {
+            R2D_LOG("[ERROR] FDCAN reception error while waiting for PDU\r\n");
+            Error_Handler();
+          }
+
+          if ((uint32_t)(pdu_now - r2d_wait_start_tick) >= R2D_ACTIVE_TIMEOUT_MS)
+          {
+            R2D_LOG("[ERROR] Timeout: PDU did not report R2D ACTIVE within %lu ms\r\n",
+                    (unsigned long)R2D_ACTIVE_TIMEOUT_MS);
+            Error_Handler();
+          }
+
+          HAL_Delay(R2D_STATUS_CHECK_PERIOD_MS);
         }
 
-        Sound_R2D_Buzzer();                                                                                               // Activates the R2D acoustic indication
-        return;                                                                                                           // Enters the main control loop only after R2D has been confirmed
+        R2D_LOG("[R2D] PDU confirms ACTIVE -> Status=0x%04X\r\n", R2D_status);
+        R2D_LOG("[R2D] AIR+=%u | AIR-=%u | PRE=%u | DIS=%u | Errors=0x%04X\r\n",
+                R2D_air_positive_active ? 1U : 0U,
+                R2D_air_negative_active ? 1U : 0U,
+                R2D_precharge_active ? 1U : 0U,
+                R2D_discharge_active ? 1U : 0U,
+                R2D_error_flags);
+
+        R2D_LOG("[R2D] Activating buzzer for %lu ms...\r\n",
+                (unsigned long)R2D_BUZZER_TIME_MS);
+        Sound_R2D_Buzzer();
+        R2D_LOG("[R2D] Buzzer finished\r\n");
+        R2D_LOG("[R2D] STARTUP SEQUENCE COMPLETE -> entering main control loop\r\n");
+        R2D_LOG("==================================================\r\n\r\n");
+        return;
       }
     }
     else
     {
-      hold_timer_started = false;                                                                                         // Any release or brake acquisition fault restarts the complete two-second validation
+      if (hold_timer_started)
+      {
+        R2D_LOG("[R2D] Conditions lost before 2 s -> hold timer RESET\r\n");
+      }
+      hold_timer_started = false;
     }
 
     HAL_Delay(R2D_CHECK_PERIOD_MS);
@@ -869,6 +1037,8 @@ void Send_CAN_Message(uint32_t id, uint8_t *data, uint32_t len)                 
 
 void Error_Handler(void)                                                                                                  // Places the application in a visible non-driving fault state
 {
+  R2D_LOG("[ERROR] Error_Handler entered -> control loop stopped\r\n");
+
   while (1)
   {
     HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);                                                                                // Blink the onboard LED while the principal control loop remains stopped

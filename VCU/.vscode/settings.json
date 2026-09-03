@@ -1,7 +1,12 @@
 {
-    "stm32-for-vscode.makePath": false,
+    "stm32-for-vscode.makePath": "",
     "editor.renderLineHighlight": "all",
-
+    "files.associations": {
+        "*.bak": "plaintext"
+    },
+    "files.exclude": {
+        "**/*.bak": true
+    },
     "workbench.colorCustomizations": {
         "editor.lineHighlightBackground": "#FFD70045",
         "editor.lineHighlightBorder": "#FFD700AA",

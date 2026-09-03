@@ -60,6 +60,18 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define INPUT_SC_Pin GPIO_PIN_3
+#define INPUT_SC_GPIO_Port GPIOC
+#define APPS_1_Pin GPIO_PIN_0
+#define APPS_1_GPIO_Port GPIOA
+#define APPS_2_Pin GPIO_PIN_1
+#define APPS_2_GPIO_Port GPIOA
+#define FRENO_Pin GPIO_PIN_2
+#define FRENO_GPIO_Port GPIOB
+#define ARRANQUE_Pin GPIO_PIN_6
+#define ARRANQUE_GPIO_Port GPIOC
+#define BUZZER_Pin GPIO_PIN_5
+#define BUZZER_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
